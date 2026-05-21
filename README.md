@@ -190,31 +190,27 @@ sequenceDiagram
     Client->>Socket: emit("request_call", { sessionId, callType })
     
     %% Foreground vs Background Branching
-    rect rgb(240, 248, 255)
-        Note over Socket, LawyerCtrl: Scenario A: Lawyer App is in Foreground
-        Socket-->>LawyerCtrl: emit("call_incoming", callPayload)
-        
-        LawyerCtrl->>LawyerCtrl: Set internal call state (ringing)
-        LawyerCtrl->>Native: MethodChannel("playRingtone")
-        activate Native
-        Native->>Native: RingtoneManager.getRingtone(getDefaultUri(TYPE_RINGTONE))
-        Native->>Native: Start looping default system ringtone
-        deactivate Native
-        LawyerCtrl->>LawyerCtrl: Navigate to /incoming-call (FullScreen Overlay)
-    end
+    Note over Socket, LawyerCtrl: Scenario A: Lawyer App is in Foreground
+    Socket-->>LawyerCtrl: emit("call_incoming", callPayload)
+    
+    LawyerCtrl->>LawyerCtrl: Set internal call state (ringing)
+    LawyerCtrl->>Native: MethodChannel("playRingtone")
+    activate Native
+    Native->>Native: RingtoneManager.getRingtone(getDefaultUri(TYPE_RINGTONE))
+    Native->>Native: Start looping default system ringtone
+    deactivate Native
+    LawyerCtrl->>LawyerCtrl: Navigate to /incoming-call (FullScreen Overlay)
 
-    rect rgb(255, 240, 245)
-        Note over Socket, LocalNotif: Scenario B: Lawyer App is in Background / Killed
-        Socket->>FCM: Trigger Push Notification (INCOMING_CALL payload)
-        FCM-->>LocalNotif: Receive High-Priority FCM Push Message
-        
-        LocalNotif->>LocalNotif: parseMessageData()
-        LocalNotif->>Native: showCallNotification() with fullScreenIntent
-        activate Native
-        Native->>Native: Play system channel default ringtone
-        Native->>Native: Display heads-up incoming call alert banner
-        deactivate Native
-    end
+    Note over Socket, LocalNotif: Scenario B: Lawyer App is in Background / Killed
+    Socket->>FCM: Trigger Push Notification (INCOMING_CALL payload)
+    FCM-->>LocalNotif: Receive High-Priority FCM Push Message
+    
+    LocalNotif->>LocalNotif: parseMessageData()
+    LocalNotif->>Native: showCallNotification() with fullScreenIntent
+    activate Native
+    Native->>Native: Play system channel default ringtone
+    Native->>Native: Display heads-up incoming call alert banner
+    deactivate Native
 
     %% Answering Flow
     Note over LawyerCtrl: Lawyer Decides Action
