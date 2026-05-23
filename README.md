@@ -19,12 +19,13 @@ graph TD
         LawyerApp["Lawyer App UI & Controllers"]
         PlatformChannel["Platform Channel (MethodChannel)"]
         NativeRingtone["Android RingtoneManager / iOS Audio"]
+        FeatureFlagService["FeatureFlagService & FeatureGate"]
     end
 
     subgraph BackendServices ["Backend & Realtime Services"]
-        APIServer["Node.js API Server (REST)"]
-        SocketServer["Socket.IO Server (Signaling)"]
-        Database[("MongoDB / Postgres Database")]
+        APIServer["Node.js API Server (REST)<br/>Base URL: https://api.lawl.app/api<br/>Port: 443 HTTPS"]
+        SocketServer["Socket.IO Server (Signaling)<br/>Host: https://api.lawl.app<br/>Port: 443 WSS"]
+        Database[("MongoDB Database")]
     end
 
     subgraph ThirdParty ["Third-Party Service Providers"]
@@ -35,10 +36,11 @@ graph TD
     end
 
     %% Client Relations
-    ClientApp <--> APIServer
-    ClientApp <--> SocketServer
-    LawyerApp <--> APIServer
-    LawyerApp <--> SocketServer
+    ClientApp -- "HTTP REST APIs" --> APIServer
+    ClientApp -- "Websocket WSS Connection" --> SocketServer
+    LawyerApp -- "HTTP REST APIs" --> APIServer
+    LawyerApp -- "Websocket WSS Connection" --> SocketServer
+    FeatureFlagService -- "GET /config (Latency: 100-250ms)" --> APIServer
 
     %% Native Channels
     LawyerApp <--> PlatformChannel
@@ -57,15 +59,15 @@ graph TD
     APIServer <--> eCourtsScraper
 
     %% Apply Styling Classes
-    class ClientApp,LawyerApp,PlatformChannel,NativeRingtone client;
+    class ClientApp,LawyerApp,PlatformChannel,NativeRingtone,FeatureFlagService client;
     class APIServer,SocketServer,Database server;
     class FCM,HMS,Razorpay,eCourtsScraper external;
 ```
 
 ---
 
-## 2. Authentication & Onboarding Workflow
-This flowchart outlines the process of user registration, role selection, and the lawyer verification pipeline (KYC approval/rejection).
+## 2. Onboarding & Authentication Workflow
+This flowchart outlines the process of user registration, role selection, and the lawyer verification pipeline (KYC approval/rejection) with exact API endpoints, request/response payload details, and average latencies.
 
 ```mermaid
 flowchart TD
@@ -77,30 +79,41 @@ flowchart TD
 
     Start(["Start Onboarding / Login"]) --> InputPhone["Input Mobile Number"]
     InputPhone --> ReqOTP["Request OTP (API Call)"]
-    ReqOTP --> SendSMS["SMS Gateway Dispatches OTP"]
+    
+    subgraph OTP Generation API
+        ReqOTP --> SendRegisterPhone["POST /auth/register/phone/send-otp<br/>Payload: { phone }<br/>Latency: Fast (~200-500ms)"]
+        ReqOTP --> SendLoginPhone["POST /auth/login/phone/send-otp<br/>Payload: { phone }<br/>Latency: Fast (~200-500ms)"]
+    end
+
+    SendRegisterPhone --> SendSMS["SMS Gateway Dispatches OTP"]
+    SendLoginPhone --> SendSMS
+    
     SendSMS --> EnterOTP["User Enters OTP"]
     EnterOTP --> VerifyOTP{"OTP Valid?"}
 
     VerifyOTP -- No --> AlertError["Display Error Toast"]
     AlertError --> EnterOTP
 
-    VerifyOTP -- Yes --> CheckProfile{"Profile Exists?"}
+    VerifyOTP -- Yes --> CheckProfile{"Profile Exists?<br/>POST /auth/login/phone/verify<br/>Payload: { phone, otp }<br/>Response: { success: true, token }<br/>Latency: Fast (~150-300ms)"}
 
-    CheckProfile -- Yes --> CheckRole{"Role Type?"}
+    CheckProfile -- Yes (Mark Auth Complete) --> CheckRole{"Role Type?<br/>GET /user/profile<br/>Latency: Fast (~100-200ms)"}
     
-    CheckProfile -- No --> FillDetails["Fill Basic Details (Name, Email, City)"]
-    FillDetails --> ChooseRole{"Select Role"}
+    CheckProfile -- No (Create Temp Session) --> FillDetails["Fill Basic Details (Name, Email)<br/>POST /auth/register/phone/verify<br/>Payload: { phone, otp }<br/>Response: { success: true, token }<br/>Latency: Fast (~150-300ms)"]
     
-    ChooseRole -- "Client User" --> SaveClient["Create Client Profile"]
+    FillDetails --> ReqEmailOTP["Verify Email Address<br/>POST /auth/register/email/send-otp<br/>Payload: { email }<br/>Latency: Fast (~200-600ms)<br/>POST /auth/register/email/verify<br/>Payload: { email, otp }<br/>Response: { success: true, token }<br/>Latency: Fast (~150-300ms)"]
+    
+    ReqEmailOTP --> ChooseRole{"Select Role"}
+    
+    ChooseRole -- "Client User" --> SaveClient["Create Client Profile<br/>POST /user/register<br/>Payload: { name }<br/>Response: { success: true, token }<br/>Latency: Fast (~150-300ms)"]
     SaveClient --> ClientDashboard(["Access Client Dashboard"])
     
-    ChooseRole -- "Lawyer / Advocate" --> SaveLawyer["Create Basic Lawyer Profile"]
+    ChooseRole -- "Lawyer / Advocate" --> SaveLawyer["Create Basic Lawyer Profile<br/>POST /lawyer/register<br/>Payload: { name, barCouncilNumber, state, district, courtComplex }<br/>Response: { success: true, token }<br/>Latency: Fast (~200-400ms)"]
     
     CheckRole -- "Client User" --> ClientDashboard
     CheckRole -- "Lawyer / Advocate" --> CheckVerificationStatus
     
-    SaveLawyer --> UploadKYC["Upload KYC Docs (Bar Council ID, Registration Certificate)"]
-    UploadKYC --> CheckVerificationStatus{"Verification Status"}
+    SaveLawyer --> UploadKYC["Upload KYC Docs<br/>POST /lawyer/upload-document (Multipart)<br/>Payload: [document: file, type: 'registration']<br/>POST /lawyer/ekyc<br/>Payload: { specialization, experienceYears, languages }<br/>Latency: Medium (~300-1200ms)"]
+    UploadKYC --> CheckVerificationStatus{"Verification Status?<br/>GET /lawyer/profile<br/>Latency: Fast (~100-200ms)"}
     
     CheckVerificationStatus -- "Approved" --> LawyerDashboard(["Access Lawyer Dashboard"])
     CheckVerificationStatus -- "Pending" --> BlockScreen["Show Pending Verification Overlay"]
@@ -109,7 +122,7 @@ flowchart TD
     BlockScreen --> ExitOrWait["Wait for Admin Approval"]
     ReUploadKYC --> UploadKYC
 
-    class InputPhone,ReqOTP,SendSMS,EnterOTP,AlertError,FillDetails,SaveClient,SaveLawyer,UploadKYC,BlockScreen,ReUploadKYC,ExitOrWait step;
+    class InputPhone,ReqOTP,SendRegisterPhone,SendLoginPhone,SendSMS,EnterOTP,AlertError,FillDetails,ReqEmailOTP,SaveClient,SaveLawyer,UploadKYC,BlockScreen,ReUploadKYC,ExitOrWait step;
     class VerifyOTP,CheckProfile,CheckRole,ChooseRole,CheckVerificationStatus decision;
     class ClientDashboard,LawyerDashboard success;
 ```
@@ -117,81 +130,94 @@ flowchart TD
 ---
 
 ## 3. Session Lifecycle & Socket Signaling
-Consultations in LAWL are structured around a **Session-First** flow, where chat/call features are only enabled inside an active session.
+Consultations in LAWL are structured around a **Session-First** flow, where chat/call features are only enabled inside an active session. State transitions are requested via secure HTTP endpoints, and real-time updates are pushed via Socket.IO.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Client as Client User
+    participant API as Node.js API Server
+    participant DB as MongoDB Database
     participant Socket as Socket.IO Server
-    participant DB as Backend Database
     actor Lawyer as Lawyer User
 
     %% Request Initiation
-    Client->>Socket: emit("request_session", { lawyerId, sessionType })
-    activate Socket
-    Socket->>DB: Create Session (status: "requested")
-    Socket-->>Lawyer: emit("new_session_request", sessionPayload)
-    deactivate Socket
+    Client->>API: HTTP POST /sessions<br/>Payload: { lawyerId, chatId, ratePerMinute, type }<br/>Latency: Fast (~150-300ms)
+    activate API
+    API->>DB: Create Session (status: "REQUESTED")
+    API->>Socket: Trigger real-time alert
+    Socket-->>Lawyer: Socket emit("new_session_request", sessionPayload)
+    API-->>Client: Response { success: true, session }
+    deactivate API
     Note over Lawyer: Lawyer receives request list in real-time
 
     %% Accept or Decline decision
     alt Lawyer accepts session request
-        Lawyer->>Socket: emit("accept_session", { sessionId })
-        activate Socket
-        Socket->>DB: Update Session (status: "active")
-        Socket-->>Client: emit("session_active", sessionPayload)
-        Socket-->>Lawyer: emit("session_active", sessionPayload)
-        deactivate Socket
+        Lawyer->>API: HTTP POST /sessions/:sessionId/accept<br/>Latency: Fast (~200-350ms)
+        activate API
+        API->>DB: Update Session (status: "ACTIVE")
+        API->>Socket: Trigger active session state
+        Socket-->>Client: Socket emit("session_active", sessionPayload)
+        Socket-->>Lawyer: Socket emit("session_active", sessionPayload)
+        API-->>Lawyer: Response { success: true }
+        deactivate API
         Note over Client, Lawyer: Chat screen unlocked, Call features active
     else Lawyer rejects session request
-        Lawyer->>Socket: emit("reject_session", { sessionId })
-        activate Socket
-        Socket->>DB: Update Session (status: "rejected")
-        Socket-->>Client: emit("session_rejected", { sessionId })
-        deactivate Socket
+        Lawyer->>API: HTTP POST /sessions/:sessionId/reject<br/>Latency: Fast (~150-300ms)
+        activate API
+        API->>DB: Update Session (status: "REJECTED")
+        API->>Socket: Trigger reject alert
+        Socket-->>Client: Socket emit("session_rejected", { sessionId })
+        API-->>Lawyer: Response { success: true }
+        deactivate API
         Note over Client: Notified of rejection, refund credited
     else Client cancels request before response
-        Client->>Socket: emit("cancel_session", { sessionId })
-        activate Socket
-        Socket->>DB: Update Session (status: "cancelled")
-        Socket-->>Lawyer: emit("session_cancelled", { sessionId })
-        deactivate Socket
+        Client->>API: HTTP POST /sessions/:sessionId/cancel<br/>Latency: Fast (~150-300ms)
+        activate API
+        API->>DB: Update Session (status: "CANCELLED")
+        API->>Socket: Trigger cancel alert
+        Socket-->>Lawyer: Socket emit("session_cancelled", { sessionId })
+        API-->>Client: Response { success: true }
+        deactivate API
     end
 
     %% Session Ending
     Note over Client, Lawyer: Active consultation in progress...
     alt User/Lawyer ends session manually
-        Client->>Socket: emit("end_session", { sessionId })
-        activate Socket
-        Socket->>DB: Update Session (status: "ended")
-        Socket-->>Lawyer: emit("session_ended", { sessionId })
-        deactivate Socket
-        Note over Client, Lawyer: Navigate to feedback / ratings screen
+        Client->>API: HTTP POST /sessions/:sessionId/end<br/>Latency: Fast (~200-400ms)
+        activate API
+        API->>DB: Update Session (status: "ENDED")
+        API->>Socket: Trigger end session
+        Socket-->>Lawyer: Socket emit("session_ended", { sessionId, reason: "USER_ENDED" })
+        Socket-->>Client: Socket emit("session_ended", { sessionId, reason: "USER_ENDED" })
+        API-->>Client: Response { success: true }
+        deactivate API
+        Note over Client, Lawyer: Navigate to feedback / ratings screen (POST /sessions/:sessionId/rate)
     end
 ```
 
 ---
 
 ## 4. Call Lifecycle & Native Ringtone Flow
-This flow details how real-time call requests invoke native ringtone loop mechanisms in both foreground and background states, transitioning into WebRTC video/voice sessions via the 100ms SDK.
+This sequence diagram details how calls are initiated, how the native system ringtone loops are activated in foreground/background states, how WebRTC is joined using the 100ms SDK, and how teardown works.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Client as Client User
     participant Socket as Socket.IO Server
+    participant API as Node.js API Server
     participant FCM as Firebase Push Server
     participant LawyerCtrl as Lawyer CallController (GetX)
     participant LocalNotif as LocalNotificationService
     participant Native as Native Android (MainActivity)
     participant HMS as 100ms SDK
 
-    Client->>Socket: emit("request_call", { sessionId, callType })
+    Client->>Socket: Socket emit("request_call", { sessionId, callType })
     
     %% Foreground vs Background Branching
     Note over Socket, LawyerCtrl: Scenario A: Lawyer App is in Foreground
-    Socket-->>LawyerCtrl: emit("call_incoming", callPayload)
+    Socket-->>LawyerCtrl: Socket emit("call_incoming", callPayload)
     
     LawyerCtrl->>LawyerCtrl: Set internal call state (ringing)
     LawyerCtrl->>Native: MethodChannel("playRingtone")
@@ -221,14 +247,20 @@ sequenceDiagram
         Native->>Native: ringtone.stop() & release resource
         deactivate Native
         
-        LawyerCtrl->>Socket: emit("accept_call", { sessionId })
-        Socket-->>Client: emit("call_accepted", callPayload)
+        LawyerCtrl->>API: HTTP POST /sessions/:sessionId/accept<br/>Latency: Fast (~200-350ms)
+        API-->>LawyerCtrl: Response { success: true }
+        API->>Socket: Broadcast session_active
+        Socket-->>Client: Socket emit("session_active", callPayload)
         
         %% WebRTC Join Room
         par Client Joins Room
-            Client->>HMS: Request 100ms token & Join room
+            Client->>API: HTTP GET /sessions/:sessionId/token<br/>Latency: Medium (~300-600ms)
+            API-->>Client: Response { success: true, token }
+            Client->>HMS: Join room (token)
         and Lawyer Joins Room
-            LawyerCtrl->>HMS: Request 100ms token & Join room
+            LawyerCtrl->>API: HTTP GET /sessions/:sessionId/token<br/>Latency: Medium (~300-600ms)
+            API-->>LawyerCtrl: Response { success: true, token }
+            LawyerCtrl->>HMS: Join room (token)
         end
         
         Note over Client, HMS: WebRTC Call established (Video/Voice Active)
@@ -238,18 +270,34 @@ sequenceDiagram
         activate Native
         Native->>Native: ringtone.stop()
         deactivate Native
-        LawyerCtrl->>Socket: emit("decline_call", { sessionId })
-        Socket-->>Client: emit("call_declined", { sessionId })
+        LawyerCtrl->>API: HTTP POST /sessions/:sessionId/reject<br/>Latency: Fast (~150-300ms)
+        API-->>LawyerCtrl: Response { success: true }
+        API->>Socket: Broadcast session_rejected
+        Socket-->>Client: Socket emit("session_rejected", { sessionId })
         LawyerCtrl->>LawyerCtrl: Navigate back / Close call screen
 
     else Call Timeout (No Answer for 30s)
-        Socket-->>Client: emit("call_timeout", { sessionId })
-        Socket-->>LawyerCtrl: emit("call_cancelled", { sessionId })
+        Socket-->>Client: Socket emit("call_timeout", { sessionId })
+        Socket-->>LawyerCtrl: Socket emit("call_cancelled", { sessionId })
         LawyerCtrl->>Native: MethodChannel("stopRingtone")
         activate Native
         Native->>Native: ringtone.stop()
         deactivate Native
         LawyerCtrl->>LawyerCtrl: Close call screen & show missed call
+    end
+
+    %% Call Ending / Hanging Up
+    Note over Client, HMS: Active call conversation in progress...
+    alt Client or Lawyer Hangs Up Call
+        Client->>Socket: Socket emit("end_call", { sessionId, reason: "USER_ENDED" })
+        Socket-->>LawyerCtrl: Socket emit("call_ended", { sessionId, reason: "USER_ENDED" })
+        par Client Teardown
+            Client->>HMS: Leave room / End room
+            Client->>Native: Clear window flags & reset state
+        and Lawyer Teardown
+            LawyerCtrl->>HMS: Leave room / End room
+            LawyerCtrl->>Native: MethodChannel("stopRingtone") & clear flags
+        end
     end
 ```
 
@@ -271,40 +319,41 @@ flowchart TD
     
     TimerCheck -- No --> ActiveSession
     
-    TimerCheck -- Yes --> EmitWarning["Socket Server Emits 'session_warning'"]
+    TimerCheck -- Yes --> EmitWarning["Socket Server Emits 'session_warning'<br/>Payload: { sessionId, remainingSeconds, blockPrice, canExtend, userWalletBalance }"]
     
-    EmitWarning --> ShowBottomSheet["Flutter UI: Display Extension Bottom Sheet"]
+    EmitWarning --> ShowBottomSheet["Flutter UI: Display SessionExtensionModal"]
     
     ShowBottomSheet --> CheckBalance{"Client Wallet Balance >= Block Price?"}
     
     CheckBalance -- Yes --> ConfirmExtend["Client Taps 'Confirm Extension (+15m)'"]
-    ConfirmExtend --> EmitExtend["Socket Emit 'extend_session'"]
-    EmitExtend --> DBUpdate["Server Deducts Balance & Adds Time in DB"]
-    DBUpdate --> SuccessAck["Socket Emits 'extension_success'"]
+    ConfirmExtend --> EmitExtend["HTTP POST /sessions/:sessionId/extend<br/>Latency: Fast (~250-500ms)"]
+    EmitExtend --> DBUpdate["Server Deducts Balance & Adds 900s in DB"]
+    DBUpdate --> SuccessAck["Socket Server Emits 'extension_success' to both parties"]
     SuccessAck --> ExtendCountdown["Flutter Updates Timer UI (+15 Mins)"]
     ExtendCountdown --> ActiveSession
 
-    CheckBalance -- No --> PromptTopUp["Flutter UI Shows Top-Up Required State"]
+    CheckBalance -- No --> PromptTopUp["Flutter UI Shows Top-Up Required State (Shortfall)"]
     
-    PromptTopUp --> SelectAmount["User Selects Top-Up Amount"]
-    SelectAmount --> InitRazorpay["Initiate Razorpay SDK Checkout"]
+    PromptTopUp --> SelectAmount["User Chooses Top-Up Amount (Shortfall or default)"]
+    SelectAmount --> InitRazorpay["POST /payments/create-order<br/>Payload: { amount }<br/>Response: { success, order_id, key_id }<br/>Latency: Medium (~300-600ms)"]
     
-    InitRazorpay --> RazorpayProcess{"Payment Success?"}
+    InitRazorpay --> RazorpayOverlay["Launch Razorpay checkout overlay SDK"]
+    RazorpayOverlay --> RazorpayProcess{"Razorpay Payment Success?"}
     
     RazorpayProcess -- No --> PaymentFailed["Display Payment Error Toast"]
     PaymentFailed --> ShowBottomSheet
     
-    RazorpayProcess -- Yes --> RazorpayCallback["Razorpay SDK Returns Payment ID"]
-    RazorpayCallback --> VerifyPayment["API Call: Verify Payment & Auto-Extend"]
-    VerifyPayment --> APIDBUpdate["Server Validates Signature, Credits Wallet, Extends Session"]
-    APIDBUpdate --> APISuccessAck["API Returns Success & Socket Emits Extension Success"]
+    RazorpayProcess -- Yes --> RazorpayCallback["Razorpay SDK Returns Payment ID, Order ID & Signature"]
+    RazorpayCallback --> VerifyPayment["POST /payments/verify<br/>Payload: { razorpay_order_id, razorpay_payment_id, razorpay_signature }<br/>Latency: Medium (~350-700ms)"]
+    VerifyPayment --> APIDBUpdate["Server Validates Signature, Credits Wallet, Returns Success"]
+    APIDBUpdate --> APISuccessAck["API returns success and triggers POST /sessions/:sessionId/extend automatically"]
     APISuccessAck --> ExtendCountdown
 
-    TimerCheck -- Expiry reached (0s) --> EndSession["Socket Server Emits 'session_ended'"]
+    TimerCheck -- Expiry reached (0s) --> EndSession["Socket Server Emits 'session_ended'<br/>Payload: { sessionId, reason: 'OUT_OF_BALANCE' }"]
     EndSession --> TerminateTracks["100ms Audio/Video Tracks Terminated"]
     TerminateTracks --> GoToFeedback(["Close Session & Navigate to Ratings Page"])
 
-    class ActiveSession,EmitWarning,ShowBottomSheet,ConfirmExtend,EmitExtend,DBUpdate,SuccessAck,ExtendCountdown,PromptTopUp,SelectAmount,InitRazorpay,RazorpayCallback,VerifyPayment,APIDBUpdate,APISuccessAck,PaymentFailed,EndSession,TerminateTracks state;
+    class ActiveSession,EmitWarning,ShowBottomSheet,ConfirmExtend,EmitExtend,DBUpdate,SuccessAck,ExtendCountdown,PromptTopUp,SelectAmount,InitRazorpay,RazorpayOverlay,RazorpayCallback,VerifyPayment,APIDBUpdate,APISuccessAck,PaymentFailed,EndSession,TerminateTracks state;
     class TimerCheck,CheckBalance,RazorpayProcess decision;
     class GoToFeedback action;
 ```
@@ -312,7 +361,7 @@ flowchart TD
 ---
 
 ## 6. eCourts Scraper & Case Management Flow
-This diagram details how advocates can search and add cases to their dashboard by either scanning a physical QR code or performing a query against state/district filters, scraper logic, and multi-result picking.
+This diagram details how advocates can search and add cases to their dashboard by either scanning a physical QR code or performing a query against state/district filters, scraper logic, and multi-result picking. Captchas and session cookies are automated backend-side.
 
 ```mermaid
 flowchart TD
@@ -328,14 +377,14 @@ flowchart TD
     ChooseMethod -- "Scan QR Code" --> OpenScanner["Launch Mobile Scanner SDK"]
     OpenScanner --> ScanQR["Scan Physical Case Sheet QR Code"]
     ScanQR --> ExtractCNR["Extract CNR Number String"]
-    ExtractCNR --> APIRequestCNR["API Call: /ecourts/scan-cnr"]
+    ExtractCNR --> APIRequestCNR["HTTP POST /cases/ecourt/scan<br/>Payload: { cnr }<br/>Latency: Slow/Scraping (~3.0s - 12.0s)"]
     
     ChooseMethod -- "Manual Filter Search" --> SelectLocation["Select State & District"]
     SelectLocation --> SelectCourt["Select Court Complex"]
     SelectCourt --> EnterCaseDetails["Enter Case Type, Case Number, & Year"]
-    EnterCaseDetails --> APIRequestManual["API Call: /ecourts/search-number"]
+    EnterCaseDetails --> APIRequestManual["HTTP POST /cases/ecourt/search<br/>Payload: { state_code, dist_code, court_complex_code, case_type, case_no, year }<br/>Latency: Slow/Scraping (~3.0s - 15.0s)"]
 
-    APIRequestCNR --> BackendScrape["Backend Scraper Scrapes eCourts Portal"]
+    APIRequestCNR --> BackendScrape["Backend Scraper Solves Captchas & Scrapes eCourts Portal"]
     APIRequestManual --> BackendScrape
     
     BackendScrape --> ScrapeResult{"Parse Scrape Results"}
@@ -344,16 +393,16 @@ flowchart TD
     ErrorState --> ShowErrorToast["Flutter UI: Display Error Alert Banner"]
     ShowErrorToast --> StartCaseAdd
 
-    ScrapeResult -- "Multiple Cases Match" --> ReturnMultiList["Return Matching Cases Index List"]
+    ScrapeResult -- "Multiple Cases Match" --> ReturnMultiList["Return Matching Cases Index List<br/>Response: { success: true, multiple: true, cases: [...] }"]
     ReturnMultiList --> DisplayPicker["Flutter UI: Display Selection Picker Sheet"]
     DisplayPicker --> UserSelectsCase["Lawyer Selects Exact Target Case"]
-    UserSelectsCase --> APIRequestSelect["API Call: /ecourts/select-from-multi"]
-    APIRequestSelect --> FetchFullDetails["Backend Scrapes Selected Case Details"]
+    UserSelectsCase --> APIRequestSelect["HTTP POST /cases/ecourt/select<br/>Payload: { caseInfo }<br/>Latency: Slow/Scraping (~2.0s - 8.0s)"]
+    APIRequestSelect --> FetchFullDetails["Backend Scrapes Selected Case Details Page"]
     FetchFullDetails --> SaveToDB
 
-    ScrapeResult -- "Single Direct Match" --> SaveToDB["Backend Saves Case Model to Database"]
+    ScrapeResult -- "Single Direct Match" --> SaveToDB["Backend Saves Case Model to MongoDB Database"]
     
-    SaveToDB --> ReturnCaseModel["Return Structured CaseModel JSON"]
+    SaveToDB --> ReturnCaseModel["Return Structured CaseModel JSON<br/>Response: { success: true, case }"]
     ReturnCaseModel --> InsertLocalState["EcourtCaseController: cases.insert(0, saved)"]
     InsertLocalState --> SyncUpcomingHearings["Sort Cases & Update Upcoming Hearing Date Alerts"]
     SyncUpcomingHearings --> SuccessView(["Case Dashboard Refreshed with New Case Tracking"])
@@ -362,4 +411,63 @@ flowchart TD
     class ChooseMethod,ScrapeResult decision;
     class SuccessView success;
     class ShowErrorToast error;
+```
+
+---
+
+## 7. Feature Gates & Configuration System
+To support flexible toggles and region-specific launches, LAWL implements a dynamic Feature Gate system loading configurations from the backend.
+
+### 7.1 Architecture Overview
+- **Startup Fetching**: The `SplashScreen` fetches the master flags during initialization via the REST API endpoint `GET /config` (Latency: ~100-250ms).
+- **Caching Mechanism**: The `FeatureFlagService` persists the key-value toggles locally using secure storage (`FlutterSecureStorage` under cache key `feature_flags_cache`). This prevents visual flickering when navigating screens.
+- **Auto-Refresh**: Toggles are automatically re-fetched in the background on application resume events via `WidgetsBindingObserver`.
+- **Runtime Evaluation**: UI widgets evaluate flags using the static class `FeatureGate.isEnabled(key)` or `FeatureGate.evaluate(key)`. The evaluation yields specific `FeatureBehavior` parameters (e.g. `show`, `hide`, `showComingSoon`, `showDisabledState`).
+
+### 7.2 Feature Flags & Code References
+
+#### 1. `location_map_enabled` (Boolean)
+- **Description**: Governs the interactive client-side map displaying available nearby advocates.
+- **FAB Toggle (`user_main_screen.dart:L85`)**: If evaluated to `false`, the bottom center Floating Action Button is completely hidden (returns `SizedBox.shrink()`).
+- **Screen Gate (`lawyers_near_me_screen.dart:L179`)**: If user navigates directly and the flag is disabled, it bypasses permission requests and renders a fallback "Map View Unavailable" warning screen. If enabled, it initializes geolocation trackers and requests nearby lawyers from the endpoint:
+  ```http
+  GET /lawyer/nearby?lat={latitude}&lng={longitude}&radiusKm=20
+  Headers: Authorization: Bearer {token}
+  Latency: Fast (~150-300ms)
+  ```
+
+#### 2. `google_calendar` (Boolean)
+- **Description**: Dictates whether lawyer calendar views show external Google Calendar sync utilities.
+- **Calendar Integration (`lawyer_calendar_screen.dart:L419`)**: When set to `true`, the collapsing persistent calendar sliver displays the styled outline button to connect and synchronize calendar integrations:
+  ```dart
+  // Triggers Google OAuth callback integration:
+  _ctrl.connectGoogleCalendar()
+  ```
+  If set to `false`, the synchronization button is skipped from rendering.
+
+### 7.3 Lifecycle of Feature Flags
+
+```mermaid
+graph TD
+    Splash["SplashScreen Init"] --> FetchFlags["API Call: GET /config<br/>(Latency: 100-250ms)"]
+    FetchFlags --> ResponseCheck{"API Response Success?"}
+    
+    ResponseCheck -- Yes --> UpdateInMemory["Update FeatureFlagService.flags Map"]
+    UpdateInMemory --> WriteCache["Save JSON string in FlutterSecureStorage<br/>(feature_flags_cache)"]
+    
+    ResponseCheck -- No --> ReadCache["Read cached JSON from FlutterSecureStorage"]
+    ReadCache --> RestoreInMemory["Restore FeatureFlagService.flags Map"]
+    
+    WriteCache --> AppReady["Unblock App Startup & Render Main Screen"]
+    RestoreInMemory --> AppReady
+    
+    %% Evaluation
+    AppReady --> UIBuild["UI Build / Widget Build"]
+    UIBuild --> EvaluateFlag{"FeatureGate.isEnabled(key)"}
+    
+    EvaluateFlag -- "location_map_enabled == true" --> RenderFAB["Render Golden Floating Location FAB"]
+    EvaluateFlag -- "location_map_enabled == false" --> HideFAB["Render Empty SizedBox.shrink()"]
+    
+    EvaluateFlag -- "google_calendar == true" --> RenderGCalBtn["Render 'Connect Google Calendar' Button"]
+    EvaluateFlag -- "google_calendar == false" --> HideGCalBtn["Do Not Render Button"]
 ```
